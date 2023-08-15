@@ -12,19 +12,25 @@ import logging.config
 import warnings
 import random
 import datetime
+import subprocess
 from collections import namedtuple
-
+import shutil
 
 # magic = the python bindings for the library behind the `file` commmand.
+from pymediainfo import MediaInfo
 import magic
 import ffmpeg
 import cv2
 import numpy as np
 import matplotlib.pyplot as plt
+import PIL
+from osgeo import gdal
+from osgeo import osr
 
 
-from pymediainfo import MediaInfo
-
+# Although it's good that PIL properly uses the logging module,
+# I still want to turn it off.
+logging.getLogger('PIL').setLevel(logging.WARNING)
 
 logging_config = {
     "version": 1,
@@ -47,25 +53,22 @@ logging_config = {
         "handlers": ["stdout"]
     }
 }
+
 logging.config.dictConfig(logging_config)
 
 logger = logging.getLogger(__name__)
-
 VidClass = namedtuple("Video", "path, width, height, num_frames, duration_sec")
-
-
 metadata_cache = {}
+
+
 def get_metadata(path):
     global metadata_cache
-
     if path in metadata_cache:
         return metadata_cache[path]
-
     try:
         metadata = ffmpeg.probe(path)
     except Exception:
         metadata = None
-
     metadata_cache[path] = metadata
     return metadata
 
@@ -144,29 +147,6 @@ def is_video_mediainfo(path):
 
     return True
 
-def augment_test(loader1, loader2):
-    '''
-    Example of how to display multiple pictures at once in matplotlib
-    '''
-    num_cols_figure = 5
-    _, figs = plt.subplots(2, num_cols_figure, figsize=(15, 15))
-    for i, (fig_top, fig_bottom) in enumerate(zip(figs[0], figs[1])):
-        x1, y1 = loader1[i]
-        x2, y2 = loader2[i]
-        fig_top.imshow(x1)
-        ax = fig_top.axes
-        ax.set_title("Original")
-        ax.title.set_fontsize(14)
-        ax.get_xaxis().set_visible(False)
-        ax.get_yaxis().set_visible(False)
-        to_show = mx.nd.transpose(x2, (1, 2, 0))
-        fig_bottom.imshow(to_show.asnumpy())
-        ax = fig_bottom.axes
-        ax.set_title("Modified")
-        ax.title.set_fontsize(14)
-        ax.get_xaxis().set_visible(False)
-        ax.get_yaxis().set_visible(False)
-    plt.show()
 
 
 def get_video_stats(path):
@@ -181,6 +161,17 @@ def get_video_stats(path):
     logger.debug(f"{vidname}")
 
     ##################################################################
+    # Check whether the file is partially downloaded or not
+    ##################################################################
+
+    if path.endswith(".part"):
+        # This is not something that will likely be put there for ,
+        # so for now we can go with a file extension check.
+        logger.debug("Skipping, file download was not complete.")
+        breakpoint()
+        return None
+
+    ##################################################################
     # Get the number of frames
     ##################################################################
 
@@ -190,12 +181,9 @@ def get_video_stats(path):
         num_frames = int(num_frames)
     else:
         logger.debug("Using cv2 to compute number of frames...")
-        '''
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
-            num_frames = get_num_frames(item)
-        '''
-        num_frames = get_num_frames(path)
+            num_frames = get_num_frames(path)
 
     if num_frames <= 0:
         logger.debug("Could not compute the number of frames.")
@@ -204,9 +192,8 @@ def get_video_stats(path):
     num_frames = int(num_frames)
 
     ##################################################################
-    # Get the duration (via num_frames * FPS, because CV2 allows us to
-    # get the number of frames and the FPS but not the duration
-    # directly.
+    # Get the duration via num_frames * FPS, because CV2 allows us to
+    # get the number of frames and the FPS but not the duration.
     ##################################################################
 
     duration_sec = None
@@ -216,17 +203,18 @@ def get_video_stats(path):
         logger.debug("Computing duration via CV2...")
         # If this fails I woulnd't be surprised
         fps = get_fps(path)
-        logger.debug(f"FPS: {fps}")
         duration_sec = (1/fps) * num_frames
+        logger.debug(f"        FPS: {fps}")
 
     ts = datetime.timedelta(seconds=duration_sec)
-    logger.debug(f"Duration: {ts}")
-
+    logger.debug(f"   Duration: {ts}")
+    logger.debug(f"num. frames: {num_frames}")
     vid = VidClass(path=path,
                    width=int(width),
                    height=int(height),
                    num_frames=num_frames,
                    duration_sec=duration_sec)
+
     return vid
 
 
@@ -252,38 +240,74 @@ def sample_frame_uniform(data):
     return ret
 
 
-def export_frame(vid: VidClass, frame_num: int):
-    cap = cv2.VideoCapture(vid.path)
-    cap.set(cv2.CAP_PROP_POS_FRAMES, frame_num)
-    ret, frame = cap.read()
+def is_png_valid(path : str):
+    """
+    Use PIL to check if the given file is a valid PNG.
+    """
+    try:
+        im = PIL.Image.open(path)
+        im.verify()
+        im.close()
+    except Exception as ex:
+        logger.debug(f"Produced exception '{type(ex)}'.")
+        raise ex
+        return False
 
-    if not ret:
-        logger.debug("Couldn't get frame via cv2.CAP_PROP_POS_FRAMES.")
-    else:
-        return frame
+    return True
 
-    time_ms = (frame_num * (vid.num_frames / vid.duration_sec)) * 1000
 
-    cap.set(cv2.CAP_PROP_POS_MSEC, time_ms)
-    ret, frame = cap.read()
+def get_frame_numpy(vid: VidClass, frame_num: int, outfile: str):
+    '''
+    Load a frame as a numpy array.
+    '''
+    time_sec = (frame_num / vid.num_frames) * vid.duration_sec
+    time_ms = round(time_sec * 1000)
 
-    if not ret:
+    out, _ = (
+        ffmpeg
+        .input(vid.path, ss=f"{time_ms}ms")
+        .output('pipe:', vframes=1, format='rawvideo', pix_fmt='rgb24', **{'qscale:v': 1})
+        .run(capture_stdout=True)
+    )
+
+    frame = (
+        np
+        .frombuffer(out, np.uint8)
+        .reshape([-1, vid.height, vid.width, 3])
+    )
+
+    if frame.shape[0] != 1:
         breakpoint()
-        logger.debug("Couldn't get frame via cv2.CAP_PROP_POS_MSEC.")
-        return None
+        raise Exception("Somehow more than one frame was loaded.")
 
-    return frame
+    return True
+
+
+def export_frame_png(vid: VidClass, frame_num: int, outfile: str):
+    time_sec = (frame_num / vid.num_frames) * vid.duration_sec
+    time_ms = round(time_sec * 1000)
+    cmd = f'ffmpeg -y -ss {time_ms}ms -i "{vid.path}" -vframes 1 -qscale:v 1 "{outfile}" >/dev/null 2>&1'
+    subprocess.call(cmd, shell=True)
+    if not is_png_valid(outfile):
+        breakpoint()
+        logger.debug("Produced and invalid PNG.")
+
+    return True
 
 if __name__ == "__main__":
 
-    path = "/mnt/2TBSSD/01_nate_datasets/movies"
+    #path = "/mnt/2TBSSD/01_nate_datasets/movies"
+    path = "/mnt/2TBSSD/01_nate_datasets/movies_small"
+    output_dir = "/home/nate/spyder_projects/vid_sampler/output/"
 
-    logger.debug(f"Crawling {path} using `is_video_mediainfo`...")
+    logger.info(f"Crawling {path} using `is_video_mediainfo`...")
     vids = crawl_folder(path, is_video_mediainfo)
     data = []
+
+    logger.info("Compiling metadata...")
     for i, item in enumerate(vids):
         # If here, item is a video file that VLC could probably play.
-        # The prom is that not all video formats store the total
+        # The problem is that not all video formats store the total
         # number of frames in a header, and if they don't we cannot
         # always compute the total number frames using the strategies
         # that are currently implemented.
@@ -292,19 +316,90 @@ if __name__ == "__main__":
         if res:
             data.append(res)
 
-    os.makedirs("./output", exist_ok=True)
+    logger.info("Sampling frames and writing PNGs...")
 
-    for i in range(0, 64):
+    os.makedirs(output_dir, exist_ok=True)
+    for i in range(0, 8):
         (video, frame_num) = sample_frame_uniform(data)
         vidname = os.path.basename(video.path)
         logging.debug(f"{i:5}: {vidname}")
         logging.debug(f"Frame: {frame_num}/{video.num_frames}")
-        frame = export_frame(video, frame_num)
+        outfile = os.path.join(output_dir, f"{i}.png")
+        frame = export_frame_png(video, frame_num, outfile)
+
+    ##################################################################
+    # Sparse matrices are an option for Geotiff generation:
+    # https://docs.scipy.org/doc/scipy/reference/generated/scipy.sparse.csr_matrix.html#scipy.sparse.csr_matrix
+    # https://stackoverflow.com/questions/14855177/write-data-to-geotiff-using-gdal-without-creating-data-array?rq=3
+    # ImageMagick can open geotiff:
+    # https://gis.stackexchange.com/questions/268961/looking-for-an-openev-replacement-i-e-a-fast-geotiff-viewer
+    # Gdal documentation:
+    # https://gdal.org/api/python/osgeo.gdal.html
+    ##################################################################
+    # Ideas:
+    # - No matter what, it has to have one edge touching another edge?
+    #     - No, we want a tweakable amount of intersections (maybe even set the distribution?)
+    # - Why not just start with uniform cloud of points (defined by num points per unit area in px)
+    #     - This would be a good place to start.
+    ##################################################################
+
+    x_res = 4096
+    y_res = 4096
+
+    output_fname = 'test.tif'
+    driver = gdal.GetDriverByName('GTiff')
+
+    # This writes the file.
+    num_bands = 1
+    dst_ds = driver.Create(output_fname,
+                           x_res,
+                           y_res,
+                           num_bands,
+                           gdal.GDT_Float32)
+
+    # Set raster's projection
+    srs = osr.SpatialReference()
+    srs.ImportFromEPSG(4326)
+    dst_ds.SetProjection(srs.ExportToWkt())
+    #print(dst_ds.GetProjection())
+    #breakpoint()
+
+    ##################################################################
+    # Parameters of geotransform
+    # NOTE: the upper left of the map is -x, +y
+    # See: https://gdal.org/tutorials/geotransforms_tut.html
+    ##################################################################
+    upper_left_x = -16
+    upper_left_y = 16
+    width_x = 32
+    width_y = 32
+    ##################################################################
+    pixel_width_ns = width_x / x_res
+    pixel_width_we = width_y / y_res
+    geotransform = [upper_left_x,
+                    pixel_width_we,
+                    0.0,
+                    upper_left_y,
+                    0.0,
+                    -1*pixel_width_ns]
+
+    dst_ds.SetGeoTransform(geotransform)
+    xpos = 0
+    ypos = 0
+    for i in range(0, 8):
+        # generate random data
+        arr = np.ones((512, 512))
+        #mult = np.random.uniform()
+        mult = 1.0
+        arr = arr * mult
+        # write data to band 1 ("band" = "channel" in geo-speak.)
+        # (Basically allows us to copy and paste an ndarray onto a geotiff.)
+        xpos = i*512
+        ypos = i*512
+        dst_ds.GetRasterBand(1).WriteArray(arr, xoff=xpos, yoff=ypos)
+
+    dst_ds.GetRasterBand(1).SetNoDataValue(0)
+    dst_ds.FlushCache()
 
 
-
-    breakpoint()
     print("done")
-
-    # It'd be preferable to have equal probability per frame rather
-    # than unit time.
