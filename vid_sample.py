@@ -24,6 +24,7 @@ import cv2
 import numpy as np
 import matplotlib.pyplot as plt
 import PIL
+import geojson
 from osgeo import gdal
 from osgeo import osr
 
@@ -255,8 +256,12 @@ def is_png_valid(path : str):
 
     return True
 
+def interval_intersection(interval1, interval2):
+    new_min = max(interval1[0], interval2[0])
+    new_max = min(interval1[1], interval2[1])
+    return [new_min, new_max] if new_min <= new_max else None
 
-def get_frame_numpy(vid: VidClass, frame_num: int, outfile: str):
+def get_frame_numpy(vid: VidClass, frame_num: int):
     '''
     Load a frame as a numpy array.
     '''
@@ -266,7 +271,12 @@ def get_frame_numpy(vid: VidClass, frame_num: int, outfile: str):
     out, _ = (
         ffmpeg
         .input(vid.path, ss=f"{time_ms}ms")
-        .output('pipe:', vframes=1, format='rawvideo', pix_fmt='rgb24', **{'qscale:v': 1})
+        .output('pipe:',
+                vframes=1,
+                format='rawvideo',
+                loglevel="quiet",
+                pix_fmt='rgb24',
+                **{'qscale:v': 1})
         .run(capture_stdout=True)
     )
 
@@ -280,7 +290,18 @@ def get_frame_numpy(vid: VidClass, frame_num: int, outfile: str):
         breakpoint()
         raise Exception("Somehow more than one frame was loaded.")
 
-    return True
+    if len(frame.shape) != 4:
+        breakpoint()
+        raise Exception("Unexpected number of dimensions.")
+
+    if frame.shape[2] == vid.width and frame.shape[1] == vid.height:
+        frame = np.transpose(frame, [0, 2, 1, 3])
+
+    if frame.shape[1] == vid.width and frame.shape[2] == vid.height:
+        return frame
+    else:
+        breakpoint()
+        raise Exception("Frame was not reshaped correctly.")
 
 
 def export_frame_png(vid: VidClass, frame_num: int, outfile: str):
@@ -293,6 +314,7 @@ def export_frame_png(vid: VidClass, frame_num: int, outfile: str):
         logger.debug("Produced and invalid PNG.")
 
     return True
+
 
 if __name__ == "__main__":
 
@@ -319,7 +341,7 @@ if __name__ == "__main__":
     logger.info("Sampling frames and writing PNGs...")
 
     os.makedirs(output_dir, exist_ok=True)
-    for i in range(0, 8):
+    for i in range(0, 0):
         (video, frame_num) = sample_frame_uniform(data)
         vidname = os.path.basename(video.path)
         logging.debug(f"{i:5}: {vidname}")
@@ -341,16 +363,29 @@ if __name__ == "__main__":
     #     - No, we want a tweakable amount of intersections (maybe even set the distribution?)
     # - Why not just start with uniform cloud of points (defined by num points per unit area in px)
     #     - This would be a good place to start.
+    # - Apply a circular transparency gradient to the middle of each frame before pasting. "The dollar bill effect."
     ##################################################################
+    # Params of the raster layer
+    ##################################################################
+    x_res = 512
+    y_res = 512
 
-    x_res = 4096
-    y_res = 4096
+    ##################################################################
+    # Parameters of geotransform. Places the geotiff on the map.
+    # See: https://gdal.org/tutorials/geotransforms_tut.html
+    # NOTE: the upper left of the world map is -x, +y.
+    ##################################################################
+    upper_left_x = -16
+    upper_left_y = 16
+    width_x = 32
+    width_y = 32
+    ##################################################################
 
     output_fname = 'test.tif'
     driver = gdal.GetDriverByName('GTiff')
 
-    # This writes the file.
-    num_bands = 1
+    # Bands = channels in geo-lingo
+    num_bands = 3
     dst_ds = driver.Create(output_fname,
                            x_res,
                            y_res,
@@ -361,19 +396,7 @@ if __name__ == "__main__":
     srs = osr.SpatialReference()
     srs.ImportFromEPSG(4326)
     dst_ds.SetProjection(srs.ExportToWkt())
-    #print(dst_ds.GetProjection())
-    #breakpoint()
 
-    ##################################################################
-    # Parameters of geotransform
-    # NOTE: the upper left of the map is -x, +y
-    # See: https://gdal.org/tutorials/geotransforms_tut.html
-    ##################################################################
-    upper_left_x = -16
-    upper_left_y = 16
-    width_x = 32
-    width_y = 32
-    ##################################################################
     pixel_width_ns = width_x / x_res
     pixel_width_we = width_y / y_res
     geotransform = [upper_left_x,
@@ -386,19 +409,168 @@ if __name__ == "__main__":
     dst_ds.SetGeoTransform(geotransform)
     xpos = 0
     ypos = 0
-    for i in range(0, 8):
-        # generate random data
-        arr = np.ones((512, 512))
-        #mult = np.random.uniform()
-        mult = 1.0
-        arr = arr * mult
-        # write data to band 1 ("band" = "channel" in geo-speak.)
-        # (Basically allows us to copy and paste an ndarray onto a geotiff.)
-        xpos = i*512
-        ypos = i*512
-        dst_ds.GetRasterBand(1).WriteArray(arr, xoff=xpos, yoff=ypos)
+
+    # The points that we want to log
+    PointLog = namedtuple("PointLog", "upper_left, upper_left_actual, bottom_right, bottom_right_actual")
+
+    def pixel_to_coords(GT, pixel_coords):
+        X_pixel = pixel_coords[0]
+        Y_line = pixel_coords[1]
+        X_geo = GT[0] + X_pixel * GT[1] + Y_line * GT[2]
+        Y_geo = GT[3] + X_pixel * GT[4] + Y_line * GT[5]
+        return [X_geo, Y_geo]
+
+
+    def to_geojson(data : PointLog, gt):
+        # Apply geotransform to each of the lists of points
+        point_lists = []
+        for geom in data:
+            xformed = [pixel_to_coords(gt, coords) for coords in geom]
+            point_lists.append(xformed)
+
+        # Convert lists of points to MultiPoint features
+        features = []
+        for (label, points) in zip(data._fields, point_lists):
+            multipoint = geojson.MultiPoint(points)
+            feature = geojson.Feature(geometry=multipoint, properties={
+                "label": label
+            })
+            features.append(feature)
+        # Convert array of MultiPoint features to feature collection
+        feature_collection = geojson.FeatureCollection(features)
+
+        return geojson.dumps(feature_collection, indent=2)
+
+
+    point_log = PointLog([], [], [], [])
+
+    for i in range(0, 1):
+        # Sample a frame
+        (vid, frame_num) = sample_frame_uniform(data)
+        frame = get_frame_numpy(vid, frame_num)
+        ##############################################################
+        #frame = np.ones((1, x_res, y_res, 3))*(i / 8)
+        ##############################################################
+
+        # width, height, num_channels
+        frame = frame[0, :, :, :]
+
+        if frame.shape[2] != 3:
+            breakpoint()
+
+        # Dimensions of the geotiff
+        geotiff_dim = np.array([x_res, y_res], dtype='int64')
+        # Dimensions of the frame
+        frame_dim = np.array([frame.shape[0], frame.shape[1]], dtype='int64')
+        # Possible positions of the upper left corner of the frame
+        extents = geotiff_dim + frame_dim
+        # Coords of the upper left corner of the frame
+        corner = np.random.randint(0, extents)
+
+
+        ##############################################################
+        # This code was a pain in the ass
+        ##############################################################
+
+        upper_left = corner - frame_dim
+        bottom_right = corner
+
+        frame_col_interval = [upper_left[0], bottom_right[0]]
+        frame_row_interval = [upper_left[1], bottom_right[1]]
+
+        img_col_interval = [0, x_res]
+        img_row_interval = [0, y_res]
+
+        submat_col_interval = interval_intersection(frame_col_interval,
+                                                    img_col_interval)
+        submat_row_interval = interval_intersection(frame_row_interval,
+                                                    img_row_interval)
+        # Two positions on the geotiff that define the footprint of
+        # where we paste the frame
+
+        row1 = min(submat_col_interval)
+
+        index1 = [min(submat_col_interval), min(submat_row_interval)]
+        index2 = [max(submat_col_interval), max(submat_row_interval)]
+
+        # TODO: Set this to the actual submat of the frame
+        mask = np.ones((index2[0]-index1[0], index2[1]-index1[1]))
+
+        ##############################################################
+        # We have the submatrix of the geotiff, get the submatrix of
+        # the frame.
+        ##############################################################
+
+        X1 = min(index1[0], index2[0])
+        X2 = max(index1[0], index2[0])
+        Y1 = min(index1[1], index2[1])
+        Y2 = max(index1[1], index2[1])
+        assert(index1 == [X1, Y1])
+        assert(index2 == [X2, Y2])
+
+        upper_left - np.array(index1)
+
+        A1 = np.array(index1) - upper_left
+        A2 = np.array(index2) - upper_left
+
+        B1 = [min(A1[0], A2[0]), max(A1[0], A2[0])]
+        B2 = [min(A1[1], A2[1]), max(A1[1], A2[1])]
+
+        frame1 = np.copy(frame)
+        shape1 = frame.shape
+        frame = frame[B1[0]:B1[1], B2[0]:B2[1], :]
+        #frame = frame[Y1:Y2, X1:X2, :]
+
+        assert(shape1[2] == frame.shape[2])
+
+        ##############################################################
+        '''
+        print("#######################################################")
+        print(f" mask.shape: {mask.shape}")
+        print(f" Upper left: {upper_left}")
+        print(f" X Interval: {(X1, X2)}")
+        print(f"  num. kept: {X2 - X1}")
+        print(f" Y Interval: {(Y1, Y2)}")
+        print(f"  num. kept: {Y2 - Y1}")
+        print(f"     corner: {corner}")
+        '''
+
+        point_log.upper_left_actual.append([upper_left[0], upper_left[1]])
+        point_log.upper_left.append([X1, Y1])
+        # Where the corner actually is
+        point_log.bottom_right.append([X1 + frame.shape[0], Y1 + frame.shape[1]])
+        # Where the corner would have been had it not been cut off
+        point_log.bottom_right_actual.append([upper_left[0] +frame_dim[0],
+                                       upper_left[1]+frame_dim[1]])
+        print("#######################################################")
+
+        frame = frame.astype(dtype="float32")
+
+        # Why do I need this
+        frame = frame.transpose((1, 0, 2))
+
+        #breakpoint()
+        dst_ds.GetRasterBand(1).WriteArray(frame[:, :, 0],
+                                           xoff=int(X1),
+                                           yoff=int(Y1))
+
+        dst_ds.GetRasterBand(2).WriteArray(frame[:, :, 1],
+                                           xoff=int(X1),
+                                           yoff=int(Y1))
+
+        dst_ds.GetRasterBand(3).WriteArray(frame[:, :, 2],
+                                           xoff=int(X1),
+                                           yoff=int(Y1))
+
+
+
+    geojson = to_geojson(point_log, geotransform)
+    with open("point_log.geojson", "w+") as fp:
+        fp.write(geojson)
 
     dst_ds.GetRasterBand(1).SetNoDataValue(0)
+    dst_ds.GetRasterBand(2).SetNoDataValue(0)
+    dst_ds.GetRasterBand(3).SetNoDataValue(0)
     dst_ds.FlushCache()
 
 
