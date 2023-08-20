@@ -1,0 +1,13 @@
+README.md
+pyproject.toml
+requirements.txt
+setup.py
+src/vid_sampler/__init__.py
+src/vid_sampler/__main__.py
+src/vid_sampler/functions.py
+src/vid_sampler/geotiff_collage.py
+src/vid_sampler.egg-info/PKG-INFO
+src/vid_sampler.egg-info/SOURCES.txt
+src/vid_sampler.egg-info/dependency_links.txt
+src/vid_sampler.egg-info/requires.txt
+src/vid_sampler.egg-info/top_level.txt

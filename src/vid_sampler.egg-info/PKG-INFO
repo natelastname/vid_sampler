@@ -1,0 +1,14 @@
+Metadata-Version: 2.1
+Name: vid-sampler
+Version: 0.1.0
+Summary: Randomly sample videos.
+Author-email: Nathan Nichols <nathannichols454@gmail.com>
+License: BSD-3-Clause
+Requires-Python: >=3.10
+Description-Content-Type: text/markdown
+
+# vid_sampler
+
+
+
+

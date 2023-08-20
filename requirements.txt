@@ -1,0 +1,10 @@
+ffmpeg_python==0.2.0
+GDAL==3.4.1
+geojson==3.0.1
+matplotlib==3.5.1
+numpy==1.21.5
+opencv_python==4.8.0.74
+Pillow>=9.0.1
+pymediainfo==6.0.1
+python_magic==0.4.27
+tqdm==4.65.0

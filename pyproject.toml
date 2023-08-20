@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools", "setuptools-scm"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "vid_sampler"
+authors = [
+    {name = "Nathan Nichols", email = "nathannichols454@gmail.com"},
+]
+description = "Randomly sample videos."
+version = "0.1.0"
+readme = "README.md"
+requires-python = ">=3.10"
+license = {text = "BSD-3-Clause"}
+dynamic = ["dependencies"]
+
+
+[tool.setuptools.dynamic]
+dependencies = {file = ["requirements.txt"]}
