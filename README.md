@@ -1,6 +1,8 @@
 # vid_sampler
 
  Recursively discover videos and randomly sample frames from them. Can also randomly place sampled images to form a  collage.
+ 
+ See: http://chud.wtf/geotiff_collage.html
 
 # Screenshots
 
