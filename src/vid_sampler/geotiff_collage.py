@@ -54,8 +54,7 @@ def to_geojson(data: PointLog, gt):
     return geojson.dumps(feature_collection, indent=2)
 
 
-
-def simple_geotransform(x_res, y_res, upper_left_x, upper_left_y, width_x, width_y):
+def simple_geotransform(x_res, y_res, upper_left_lon, upper_left_lat, width_x, width_y):
     """
     Convenience function to construct a simple geotransform with 0
     row / column rotation.
@@ -68,17 +67,24 @@ def simple_geotransform(x_res, y_res, upper_left_x, upper_left_y, width_x, width
     ##################################################################
     pixel_width_ns = width_x / x_res
     pixel_width_we = width_y / y_res
-    geotransform = [upper_left_x,
+    geotransform = [upper_left_lon,
                     pixel_width_we,
                     0.0,
-                    upper_left_y,
+                    upper_left_lat,
                     0.0,
                     -1*pixel_width_ns]
 
     return GeotiffParams(x_res, y_res, geotransform)
 
 
-def geotiff_collage(output_fname, img_params: GeotiffParams, vids, num_frames):
+def geotiff_collage(output_fname,
+                    img_params: GeotiffParams,
+                    vids,
+                    num_frames,
+                    samples=None):
+    '''
+    `samples` is a list of FrameClass objects.
+    '''
     # Bands = channels in geo-lingo
     num_bands = 3
 
@@ -108,11 +114,19 @@ def geotiff_collage(output_fname, img_params: GeotiffParams, vids, num_frames):
     # Use TQDM but not the god awful progress bar
     pbar = tqdm.tqdm(total=num_frames, ncols=0)
 
+    if samples != None:
+        num_frames = len(samples)
+
     for i in range(0, num_frames):
         pbar.update()
         # Sample a frame
-        (vid, frame_num) = vs.sample_frame_uniform(vids)
-        frame = vs.get_frame_numpy(vid, frame_num)
+
+        if samples != None:
+            frame = samples[i]
+        else:
+            frame = vs.sample_frame_uniform(vids)
+
+        frame = vs.get_frame_numpy(frame.vid, frame.frame_num)
 
         # width, height, num_channels
         frame = frame[0, :, :, :]

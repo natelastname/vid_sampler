@@ -37,6 +37,8 @@ logger = logging.getLogger(__name__)
 
 VidClass = namedtuple("Video", "path, width, height, num_frames, duration_sec")
 
+FrameClass = namedtuple("Frame", "frame_num, vid")
+
 metadata_cache = {}
 def get_metadata(path):
     global metadata_cache
@@ -214,8 +216,10 @@ def crawl_folder(path, is_video_callback):
 def sample_frame_uniform(data):
     frame_counts = map(lambda x: int(x.num_frames), data)
     video = random.sample(data, 1, counts=frame_counts)[0]
-    ret = (video, random.randint(0, video.num_frames))
+    ret = FrameClass(frame_num=random.randint(0, video.num_frames),
+                    vid=video)
     return ret
+
 
 
 def is_png_valid(path : str):

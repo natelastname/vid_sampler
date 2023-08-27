@@ -34,51 +34,6 @@ import tqdm
 
 import vid_sampler as vs
 
-desc = ("Recursively discover videos in a directory and randomly"
-        "sample frames from them.")
-parser = argparse.ArgumentParser(prog="vid_sampler", description=desc)
-
-######################################################################
-# Always required
-######################################################################
-
-parser.add_argument("basedir",
-                    help="Directory containing videos to sample from.",
-                    type=pathlib.Path)
-
-# We can treat this as mandatory because it has a default value.
-parser.add_argument("--num-frames",
-                    help="Number of frames to sample.",
-                    default="1",
-                    type=int)
-
-######################################################################
-# Required when writing a Geotiff
-######################################################################
-
-parser.add_argument("--output-geotiff",
-                    help="Generate a geotiff collage.",
-                    type=argparse.FileType("w+"))
-
-gt_help = ("JSON array with 6 floating point elements specifying the"
-           "geotransform. See:"
-           "https://gdal.org/tutorials/geotransforms_tut.html")
-
-parser.add_argument("--geotransform",
-                    help=gt_help,
-                    type=str)
-
-######################################################################
-# Required when outputting frames
-######################################################################
-
-parser.add_argument("--output-frames",
-                    help="Directory to write the output images to.",
-                    type=pathlib.Path)
-
-######################################################################
-
-
 def has_attr_not_none(namespace, attr: str):
     """
     Return true if namespace has attribute attr and its
@@ -105,23 +60,127 @@ def attrs_has_all_or_none(namespace, attrs: List[str]):
     return True
 
 
-def args_has_all_or_none(namespace, attrs: List[str]):
+def args_has_all_not_some(namespace, attrs: List[str]):
     """
-    Returns True if it has all, False if it has none.
-    Otherwise (i.e., if namespace contains some of the attributes), an
-    exception is raised.
+    Returns True if it has all, False if it has none. Otherwise (i.e.,
+    if namespace contains some of the attributes), an exception is
+    raised.
     """
     if attrs_has_all_or_none(namespace, attrs) == False:
         raise Exception(f"Must provide all of arguments: {attrs}")
 
     return has_attr_not_none(namespace, attrs[0])
 
+######################################################################
+# Set up ArgumentParser
+######################################################################
+
+
+desc = ("Recursively discover videos in a directory and randomly"
+        "sample frames from them.")
+parser = argparse.ArgumentParser(prog="vid_sampler", description=desc)
+
+######################################################################
+# Always required
+######################################################################
+
+parser.add_argument("--input-dir",
+                    help="Directory containing videos to sample from.",
+                    type=pathlib.Path)
+
+parser.add_argument("--output-dir",
+                    help="Directory where output files are written.",
+                    type=pathlib.Path)
+
+# We can treat this as mandatory because it has a default value.
+parser.add_argument("--num-frames",
+                    help="Number of frames to sample.",
+                    default="1",
+                    type=int)
+
+######################################################################
+# Required when writing a Geotiff
+######################################################################
+parser.add_argument("--output-geotiff",
+                    help="Generate a geotiff collage.",
+                    default=None,
+                    action='store_true')
+
+gt_help = ("JSON array with 6 floating point elements specifying the"
+           "geotransform. See:"
+           "https://gdal.org/tutorials/geotransforms_tut.html")
+
+parser.add_argument("--geotransform",
+                    help=gt_help,
+                    type=str)
+
+parser.add_argument("--lon-res-px",
+                    help="x resolution of the geotiff.",
+                    type=int)
+parser.add_argument("--lat-res-px",
+                    help="y resolution of the geotiff.",
+                    type=int)
+
+
+######################################################################
+# Required when outputting frames
+######################################################################
+
+parser.add_argument("--output-frames",
+                    help="Directory to write the output images to.",
+                    default=None,
+                    action="store_true")
+
+######################################################################
+# A utility feature
+######################################################################
+
+
+# EXAMPLE:
+#    vid_sampler --simple-geotransform "[12288, 12288, -16, 16, 32, 32]"
+
+help_str = ("Convert json array of the form [x_res_px, y_res_px,"
+            "upper_left_lon, upper_left_lat, width_lon, width_lat]"
+            "to a geotransform.")
+
+parser.add_argument("--simple-geotransform",
+                    help=help_str,
+                    type=str)
+
+######################################################################
 
 
 args = parser.parse_args()
-write_frames = args_has_all_or_none(args, ["output_frames"])
-write_geotiff = args_has_all_or_none(args, ["output_geotiff", "geotransform"])
 
+gen_simple_gt = args_has_all_not_some(args, ["simple_geotransform"])
+
+write_frames = args_has_all_not_some(args, ["output_frames"])
+
+write_geotiff = args_has_all_not_some(args, ["output_geotiff",
+                                             "geotransform",
+                                             "lon_res_px",
+                                             "lat_res_px"])
+
+if write_frames or write_geotiff:
+    args_has_all_not_some(args, ["input_dir", "output_dir"])
+
+
+if gen_simple_gt:
+    simple_gt = json.loads(args.simple_geotransform)
+    if isinstance(simple_gt, list) == False or len(simple_gt) != 6:
+        print("--simple-geotransform expects JSON array of length 6.")
+        sys.exit(1)
+
+    gt = vs.simple_geotransform(*simple_gt)
+    print(json.dumps(gt.gt))
+    sys.exit(0)
+
+
+# Perform any argument validation/parsing here so that it fails quickly.
+img_params = None
+if write_geotiff:
+    gt = json.loads(args.geotransform)
+    img_params = vs.GeotiffParams(args.lon_res_px, args.lat_res_px, gt)
 
 ######################################################################
 # Set up logging
@@ -162,14 +221,9 @@ logger = logging.getLogger(__name__)
 # Discover videos
 ######################################################################
 
-#path = "/mnt/2TBSSD/01_nate_datasets/movies"
-#path = "/mnt/2TBSSD/01_nate_datasets/movies_small"
-# TODO: Don't hard code
-output_dir = "/home/nate/spyder_projects/vid_sampler/output/"
+logger.info(f"Discovering videos in {args.input_dir}...")
 
-logger.info(f"Discovering videos in {args.basedir}...")
-
-vids = vs.crawl_folder(args.basedir, vs.is_video_mediainfo)
+vids = vs.crawl_folder(args.input_dir, vs.is_video_mediainfo)
 usable_vids = []
 
 logger.info("Discarding videos that cannot be sampled from...")
@@ -184,36 +238,56 @@ for i, item in enumerate(vids):
     if res:
         usable_vids.append(res)
 
-
 logger.info(f"Done. (Kept {len(usable_vids)}/{len(vids)} files)")
 
 if len(usable_vids) == 0:
+    logger.info("No usable videos found.")
     sys.exit(0)
 
-logger.info("Sampling frames...")
-os.makedirs(output_dir, exist_ok=True)
 
+
+######################################################################
+# Sample frames
+######################################################################
+
+
+logger.info("Sampling frames...")
+os.makedirs(args.output_dir, exist_ok=True)
+
+samples = []
 for i in range(0, args.num_frames):
-    (video, frame_num) = vs.sample_frame_uniform(usable_vids)
-    vidname = os.path.basename(video.path)
+    frame = vs.sample_frame_uniform(usable_vids)
+    samples.append(frame)
+
+    vidname = os.path.basename(frame.vid.path)
     logging.debug(f"{i:5}: {vidname}")
-    logging.debug(f"Frame: {frame_num}/{video.num_frames}")
-    outfile = os.path.join(output_dir, f"{i}.png")
-    frame = vs.export_frame_png(video, frame_num, outfile)
+    logging.debug(f"Frame: {frame.frame_num}/{frame.vid.num_frames}")
+
+    if write_frames == False:
+        continue
+
+    outfile = os.path.join(args.output_dir, f"{i}.png")
+    vs.export_frame_png(frame.vid, frame.frame_num, outfile)
+
+
 
 if write_geotiff == False:
     sys.exit(0)
 
+
 logger.info("Generating geotiff collage...")
 
-x_res = 4096*3
-y_res = x_res
-upper_left_x = -16
-upper_left_y = 16
-width_x = 32
-width_y = 32
-img_params = vs.simple_geotransform(x_res, y_res, upper_left_x, upper_left_y, width_x, width_y)
+# TODO: Option to only place over pixels that have no data (maybe)
+# TODO: Use same images for geotiff and frame output
+# TODO: Options for outputting point log as geojson
+# TODO: implement log levels
+# TODO: Implement --geotransform option
 
-vs.geotiff_collage(args.output_geotiff.name, img_params, usable_vids, args.num_frames)
+
+vs.geotiff_collage(os.path.join(args.output_dir, "out.tif"),
+                   img_params,
+                   usable_vids,
+                   args.num_frames,
+                   samples=samples)
 
 print("done")
