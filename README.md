@@ -1,11 +1,11 @@
 # vid_sampler
 
- Recursively discover videos and randomly sample frames from them. Can also randomly place sampled images to form a geotiff collage.
+ Recursively discover videos and randomly sample frames from them. Can also randomly place sampled images to form a  collage.
 
 # Screenshots
 
-[screenshot1](./imgs/screenshot1.png)
-[screenshot2](./imgs/screenshot2.png)
+[screenshot1](./img/screenshot1.png)
+[screenshot2](./img/screenshot2.png)
 
 # Example usage
 
